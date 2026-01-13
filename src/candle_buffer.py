@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 class CandleBuffer:
-    def __init__(self, flush_interval=60, max_size=100):
+    def __init__(self, flush_interval=300, max_size=100):
         self.buffer = defaultdict(list)
         self.flush_interval = flush_interval
         self.max_size = max_size

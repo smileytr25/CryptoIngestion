@@ -1,11 +1,11 @@
-import websocket_client
-from candle_buffer import CandleBuffer
-from local_parquet_writer import LocalParquetWriter
+import src.websocket_client as websocket_client
+from src.candle_buffer import CandleBuffer
+from src.local_parquet_writer import LocalParquetWriter
 import sys 
 import signal 
 
 candle_buffer = CandleBuffer()
-parquet_writer = LocalParquetWriter(exchange_name="binance", base_path="./data")
+parquet_writer = LocalParquetWriter(exchange_name="binance", base_path="./data/raw")
 
 def event_handler(event):
     candle_buffer.add(event)
