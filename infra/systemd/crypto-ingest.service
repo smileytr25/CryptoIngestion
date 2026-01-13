@@ -1,0 +1,16 @@
+[Unit]
+Description=Real-time Crypto Market Data Ingestion
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/CryptoProject
+ExecStart=/usr/bin/python3 src/main.py
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
