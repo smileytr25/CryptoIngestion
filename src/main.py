@@ -1,6 +1,6 @@
-import src.websocket_client as websocket_client
-from src.candle_buffer import CandleBuffer
-from src.local_parquet_writer import LocalParquetWriter
+import websocket_client as websocket_client
+from candle_buffer import CandleBuffer
+from local_parquet_writer import LocalParquetWriter
 import sys 
 import signal 
 
