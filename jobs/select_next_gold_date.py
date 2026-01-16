@@ -1,65 +1,80 @@
 import oci
 import re
+from datetime import datetime, timezone
+from collections import defaultdict
 
+# -----------------------------
+# Config
+# -----------------------------
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-
 RAW_BUCKET = "crypto-raw"
-GOLD_BUCKET = "crypto-gold"
-
 RAW_PREFIX = "binance/"
-SUCCESS_FILE = "_SUCCESS"
-GOLD_DONE_PREFIX = "_processed_dates/"
 
+DATE_RE = re.compile(r"binance/([^/]+)/(\d{4}-\d{2}-\d{2})/.*\.parquet$")
+
+# -----------------------------
+# OCI client
+# -----------------------------
 config = oci.config.from_file()
 client = oci.object_storage.ObjectStorageClient(config)
 ns = client.get_namespace().data
 
-def list_raw_dates():
-    objs = client.list_objects(
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def list_raw_objects():
+    return client.list_objects(
         ns,
         RAW_BUCKET,
         prefix=RAW_PREFIX
     ).data.objects
 
-    dates = set()
-    for o in objs:
-        m = re.search(r"/(\d{4}-\d{2}-\d{2})/", o.name)
-        if m:
-            dates.add(m.group(1))
 
-    return sorted(dates)
+def raw_dates_by_symbol():
+    """
+    Returns:
+        dict[str, set[str]]
+        {
+            "2026-01-16": {"BTCUSDT", "ETHUSDT"},
+            ...
+        }
+    """
+    dates = defaultdict(set)
 
+    for o in list_raw_objects():
+        m = DATE_RE.match(o.name)
+        if not m:
+            continue
 
-def has_success_for_all_symbols(date):
-    for symbol in SYMBOLS:
-        prefix = f"binance/{symbol}/{date}/{SUCCESS_FILE}"
-        objs = client.list_objects(
-            ns,
-            RAW_BUCKET,
-            prefix=prefix
-        ).data.objects
-        if not objs:
-            return False
-    return True
+        symbol, date = m.groups()
+        dates[date].add(symbol)
 
-
-def already_processed(date):
-    objs = client.list_objects(
-        ns,
-        GOLD_BUCKET,
-        prefix=f"{GOLD_DONE_PREFIX}{date}.done"
-    ).data.objects
-    return len(objs) > 0
+    return dates
 
 
+# -----------------------------
+# Selection logic
+# -----------------------------
 def select_next_date():
-    for date in list_raw_dates():
-        if not has_success_for_all_symbols(date):
-            continue
-        if already_processed(date):
-            continue
-        return date
-    return None
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    dates = raw_dates_by_symbol()
+
+    # Dates that have data for all symbols
+    valid_dates = sorted(
+        d for d, syms in dates.items()
+        if set(SYMBOLS).issubset(syms)
+    )
+
+    if not valid_dates:
+        return None
+
+    # Prefer today if it has data
+    if today in valid_dates:
+        return today
+
+    # Otherwise return most recent past date
+    return valid_dates[-1]
 
 
 if __name__ == "__main__":

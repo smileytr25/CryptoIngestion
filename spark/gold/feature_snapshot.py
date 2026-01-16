@@ -6,23 +6,21 @@ from pyspark.sql.functions import (
     dayofweek, when, greatest, lit
 )
 from pyspark.sql.window import Window
-from pyspark.sql.functions import pandas_udf
+from pyspark.sql.types import StructType, StructField, DoubleType
 
 
 # ---------------------------
-# EMA Pandas UDFs
+# Pandas EMA function
 # ---------------------------
-def ema_udf(span: int):
-    @pandas_udf("double")
-    def _ema(x: pd.Series) -> pd.Series:
-        return x.ewm(span=span, adjust=False).mean()
-    return _ema
+def compute_ema(pdf: pd.DataFrame) -> pd.DataFrame:
+    pdf = pdf.sort_values("candle_close_time")
 
+    pdf["ema_5"]  = pdf["close"].ewm(span=5, adjust=False).mean()
+    pdf["ema_15"] = pdf["close"].ewm(span=15, adjust=False).mean()
+    pdf["ema_30"] = pdf["close"].ewm(span=30, adjust=False).mean()
+    pdf["ema_60"] = pdf["close"].ewm(span=60, adjust=False).mean()
 
-ema_5_udf  = ema_udf(5)
-ema_15_udf = ema_udf(15)
-ema_30_udf = ema_udf(30)
-ema_60_udf = ema_udf(60)
+    return pdf
 
 
 # ---------------------------
@@ -30,18 +28,22 @@ ema_60_udf = ema_udf(60)
 # ---------------------------
 def main(symbol: str, date: str):
 
-    spark = SparkSession.builder.appName("gold-feature-snapshot").getOrCreate()
+    spark = (
+        SparkSession.builder
+        .appName("gold-feature-snapshot")
+        .getOrCreate()
+    )
     spark.conf.set("spark.sql.shuffle.partitions", "8")
 
-    staging = f"/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
-    out = f"/tmp/gold/features/binance/{symbol}/{date}/"
+    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
+    out = f"spark/gold/tmp/gold/features/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
 
     # ---------------------------
     # Windows (NO leakage)
     # ---------------------------
-    w1  = Window.partitionBy("symbol").orderBy("close_time")
+    w1  = Window.partitionBy("symbol").orderBy("candle_close_time")
     w5  = w1.rowsBetween(-5, -1)
     w15 = w1.rowsBetween(-15, -1)
     w30 = w1.rowsBetween(-30, -1)
@@ -49,34 +51,29 @@ def main(symbol: str, date: str):
     w14 = w1.rowsBetween(-14, -1)
 
     # ---------------------------
-    # Feature engineering
+    # Feature engineering (Spark-native)
     # ---------------------------
     features = (
         df
         # returns
         .withColumn("log_return_1", log(col("close") / lag("close").over(w1)))
-        .withColumn("return_5",
+        .withColumn(
+            "return_5",
             (col("close") - lag("close", 5).over(w1)) /
             lag("close", 5).over(w1)
         )
 
         # moving averages
-        .withColumn("ma_5", avg("close").over(w5))
+        .withColumn("ma_5",  avg("close").over(w5))
         .withColumn("ma_15", avg("close").over(w15))
         .withColumn("ma_30", avg("close").over(w30))
         .withColumn("ma_60", avg("close").over(w60))
 
         # volatility
-        .withColumn("vol_5", stddev("log_return_1").over(w5))
+        .withColumn("vol_5",  stddev("log_return_1").over(w5))
         .withColumn("vol_15", stddev("log_return_1").over(w15))
         .withColumn("vol_30", stddev("log_return_1").over(w30))
         .withColumn("vol_60", stddev("log_return_1").over(w60))
-
-        # volume trends
-        .withColumn("vol_ma_5", avg("volume").over(w5))
-        .withColumn("vol_ma_15", avg("volume").over(w15))
-        .withColumn("vol_ma_30", avg("volume").over(w30))
-        .withColumn("vol_ma_60", avg("volume").over(w60))
 
         # RSI
         .withColumn("delta", col("close") - lag("close").over(w1))
@@ -91,19 +88,24 @@ def main(symbol: str, date: str):
         )
 
         # time features
-        .withColumn("hour_of_day", hour("close_time"))
-        .withColumn("day_of_week", dayofweek("close_time"))
+        .withColumn("hour_of_day", hour("candle_close_time"))
+        .withColumn("day_of_week", dayofweek("candle_close_time"))
     )
 
     # ---------------------------
-    # EMA (correct via Pandas UDF)
+    # EMA (stateful → Pandas)
     # ---------------------------
+    ema_schema = StructType(features.schema.fields + [
+        StructField("ema_5",  DoubleType()),
+        StructField("ema_15", DoubleType()),
+        StructField("ema_30", DoubleType()),
+        StructField("ema_60", DoubleType()),
+    ])
+
     features = (
         features
-        .withColumn("ema_5",  ema_5_udf(col("close")).over(w1))
-        .withColumn("ema_15", ema_15_udf(col("close")).over(w1))
-        .withColumn("ema_30", ema_30_udf(col("close")).over(w1))
-        .withColumn("ema_60", ema_60_udf(col("close")).over(w1))
+        .groupBy("symbol")
+        .applyInPandas(compute_ema, schema=ema_schema)
     )
 
     # ---------------------------
@@ -111,20 +113,23 @@ def main(symbol: str, date: str):
     # ---------------------------
     final = features.select(
         "symbol",
-        col("close_time").alias("ts"),
+        col("candle_close_time").alias("ts"),
         "close",
         "log_return_1",
         "return_5",
         "ma_5", "ma_15", "ma_30", "ma_60",
         "ema_5", "ema_15", "ema_30", "ema_60",
         "vol_5", "vol_15", "vol_30", "vol_60",
-        "vol_ma_5", "vol_ma_15", "vol_ma_30", "vol_ma_60",
         "rsi_14",
         "hour_of_day",
         "day_of_week"
     )
 
-    final.write.mode("overwrite").partitionBy("symbol").parquet(out)
+    spark.conf.set(
+        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    )
+
+    final.write.mode("overwrite").parquet(out)
     spark.stop()
 
 

@@ -1,16 +1,16 @@
 import argparse 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, trunc, avg, max, min, sum
+from pyspark.sql.functions import col, trunc, avg, max, min, sum, first, last
 
 def main(symbol, date):
     spark = SparkSession.builder.appName("gold-monthly-ohlc").getOrCreate()
     spark.conf.set("spark.sql.shuffle.partitions", "4")
 
-    staging = f"/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
-    out = f"/tmp/gold/monthly_ohlc/binance/{symbol}/{date}/"
+    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
+    out = f"spark/gold/tmp/gold/monthly_ohlc/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
-    df = df.withColumn("month", trunc(col("close_time"), "month"))
+    df = df.withColumn("month", trunc(col("candle_close_time"), "month"))
 
     monthly = (
         df.groupBy("symbol", "month")
@@ -19,12 +19,15 @@ def main(symbol, date):
             avg("close").alias("avg_price"),
             max("high").alias("high"),
             min("low").alias("low"),
-            sum("volume").alias("volume"),
             last("close").alias("close")
         )
     )
 
-    monthly.write.mode("overwrite").partitionBy("month").parquet(out)
+    spark.conf.set(
+        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    )
+    
+    monthly.write.mode("overwrite").parquet(out)
     spark.stop()
 
 if __name__ == "__main__":

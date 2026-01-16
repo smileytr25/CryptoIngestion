@@ -1,30 +1,97 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+set -x
 
 DATE="$1"
+
+WORKDIR="/home/opc/CryptoIngestion"
+cd "$WORKDIR"
+
+if [[ -z "$DATE" ]]; then
+  echo "[ERROR] DATE argument missing"
+  exit 1
+fi
+
 SYMBOLS=("BTCUSDT" "ETHUSDT")
 
-for SYMBOL in "${SYMBOLS[@]}"; do
-    python3 temp_staging.py --symbol "$SYMBOL" --date "$DATE"
+echo "[INFO] Gold pipeline starting for date: $DATE"
+echo "[INFO] Symbols: ${SYMBOLS[*]}"
 
-    python3 hourly_ohlc.py      --symbol "$SYMBOL" --date "$DATE"
-    python3 daily_ohlc.py       --symbol "$SYMBOL" --date "$DATE"
-    python3 monthly_ohlc.py     --symbol "$SYMBOL" --date "$DATE"
-    python3 feature_snapshot.py --symbol "$SYMBOL" --date "$DATE"
+# -----------------------------
+# Per-symbol processing
+# -----------------------------
+for SYMBOL in "${SYMBOLS[@]}"; do
+  echo "[INFO] Processing symbol: $SYMBOL"
+
+  python3 ./batch/temp_staging.py \
+    --symbol "$SYMBOL" \
+    --date "$DATE"
+
+  python3 ./spark/gold/hourly_ohlc.py \
+    --symbol "$SYMBOL" \
+    --date "$DATE"
+
+  python3 ./spark/gold/daily_ohlc.py \
+    --symbol "$SYMBOL" \
+    --date "$DATE"
+
+  python3 ./spark/gold/monthly_ohlc.py \
+    --symbol "$SYMBOL" \
+    --date "$DATE"
+
+  python3 ./spark/gold/feature_snapshot.py \
+    --symbol "$SYMBOL" \
+    --date "$DATE"
 done
 
-# upload gold
-oci os object bulk-upload \
-    --bucket-name crypto-gold \
-    --src-dir /tmp/gold \
-    --overwrite
+# -----------------------------
+# Upload Gold outputs
+# -----------------------------
+if [[ ! -d "./spark/gold/tmp/gold" ]] || [[ -z "$(ls -A ./spark/gold/tmp/gold)" ]]; then
+  echo "[ERROR] ./spark/gold/tmp/gold is missing or empty — aborting upload"
+  exit 1
+fi
 
-# mark date processed (CRITICAL)
-echo "ok" > /tmp/processed.txt
-oci os object put \
-    --bucket-name crypto-gold \
-    --name "_processed_dates/${DATE}.done" \
-    --file /tmp/processed.txt
+echo "[INFO] Deleting existing gold data for date $DATE"
 
-# cleanup local temp
-rm -rf /tmp/staging /tmp/gold
+OCI=/usr/local/bin/oci   # adjust if needed
+
+for SYMBOL IN "${SYMBOLS[@]}"; do
+  $OCI os object bulk-delete \
+    --bucket-name crypto-gold \
+    --prefix daily_ohlc/binance/$SYMBOL/$DATE/ \
+    --force || true
+
+  $OCI os object bulk-delete \
+    --bucket-name crypto-gold \
+    --prefix hourly_ohlc/binance/$SYMBOL/$DATE/ \
+    --force || true
+
+  $OCI os object bulk-delete \
+    --bucket-name crypto-gold \
+    --prefix monthly_ohlc/binance/$SYMBOL/$DATE/ \
+    --force || true
+
+  $OCI os object bulk-delete \
+    --bucket-name crypto-gold \
+    --prefix features/binance/$SYMBOL/$DATE/ \
+    --force || true
+done
+
+echo "[INFO] Uploading Gold data to object storage"
+
+$OCI os object bulk-upload \
+  --bucket-name crypto-gold \
+  --src-dir ./spark/gold/tmp/gold \
+  --overwrite \
+  --exclude "*.crc" \
+  --exclude "_SUCCESS" \
+  --exclude "._SUCCESS"
+
+# -----------------------------
+# Cleanup local temp data
+# -----------------------------
+echo "[INFO] Cleaning up local temp directories"
+rm -rf ./batch/tmp ./spark/gold/tmp
+
+echo "[INFO] Gold pipeline completed successfully for date: $DATE"

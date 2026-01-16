@@ -1,0 +1,10 @@
+[Unit]
+Description=Run one Gold backfill step
+After=network.target
+
+[Service]
+Type=oneshot
+User=ocp
+WorkingDirectory=/home/opc/CryptoIngestion
+ExecStart=/home/opc/CryptoIngestion/scripts/run_next_gold_step.sh
+Environment=PYTHONUNBUFFERED=1

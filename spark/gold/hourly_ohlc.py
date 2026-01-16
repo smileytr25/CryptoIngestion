@@ -6,25 +6,28 @@ def main(symbol, date):
     spark = SparkSession.builder.appName('gold-hourly-ohlc').getOrCreate()
     spark.conf.set("spark.sql.shuffle.partitions", "8")
 
-    staging = f"/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
-    out = f"/tmp/gold/hourly_ohlc/binance/{symbol}/{date}/"
+    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
+    out = f"spark/gold/tmp/gold/hourly_ohlc/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
 
     hourly = (
-        df.withColumn("hour_ts", date_trunc("hour", col("close_time")))
+        df.withColumn("hour_ts", date_trunc("hour", col("candle_close_time")))
           .groupBy("symbol", "hour_ts")
           .agg(
                 first("open").alias("open"),
                 avg("close").alias("avg_price"),
                 max("high").alias("high"),
                 min("low").alias("low"),
-                last("close").alias("close"),
-                sum("volume").alias("volume")
+                last("close").alias("close")
           )
     )
 
-    hourly.write.mode("overwrite").partitionBy("hour_ts").parquet(out)
+    spark.conf.set(
+        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    )
+
+    hourly.write.mode("overwrite").parquet(out)
 
     spark.stop()
 

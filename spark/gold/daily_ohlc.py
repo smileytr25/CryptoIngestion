@@ -1,17 +1,17 @@
 import argparse
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, first, max, min, last, sum, lag
-from pyspark.sql.window import window
+from pyspark.sql.window import Window
 
 def main(symbol, date):
     spark = SparkSession.builder.appName("gold-daily-ohlc").getOrCreate()
     spark.conf.set("spark.sql.shuffle.partitions", "8")
 
-    staging = f"/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
-    out = f"/tmp/gold/daily_ohlc/binance/{symbol}/{date}/"
+    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
+    out = f"spark/gold/tmp/gold/daily_ohlc/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
-    df = df.withColumn("date", to_date(col("close_time")))
+    df = df.withColumn("date", to_date(col("candle_close_time")))
 
     daily = (
         df.groupBy("symbol", "date")
@@ -19,8 +19,7 @@ def main(symbol, date):
             first("open").alias("open"),
             max("high").alias("high"),
             min("low").alias("low"),
-            last("close").alias("close"),
-            sum("volume").alias("volume")
+            last("close").alias("close")
           )
     )
 
@@ -31,7 +30,11 @@ def main(symbol, date):
         (col("close") - lag("close").over(w)) / lag("close").over(w)
     )
 
-    daily.write.mode("overwrite").partitionBy("date").parquet(out)
+    spark.conf.set(
+        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    )
+
+    daily.write.mode("overwrite").parquet(out)
     spark.stop()
 
 if __name__ == "__main__":
