@@ -1,40 +1,81 @@
 import argparse
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, date_trunc, first, max, min, last, sum, avg
+from pyspark.sql.functions import (
+    col,
+    date_trunc,
+    first,
+    max,
+    min,
+    last,
+    avg
+)
 
 def main(symbol, date):
-    spark = SparkSession.builder.appName('gold-hourly-ohlc').getOrCreate()
-    spark.conf.set("spark.sql.shuffle.partitions", "8")
+    spark = (
+        SparkSession
+        .builder
+        .appName("gold-hourly-ohlc")
+        .getOrCreate()
+    )
 
+    spark.conf.set("spark.sql.shuffle.partitions", "8")
+    spark.conf.set("mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
+
+    # ---------------------------
+    # Paths (DATE-scoped is correct)
+    # ---------------------------
     staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
     out = f"spark/gold/tmp/gold/hourly_ohlc/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
 
+    # ---------------------------
+    # Hourly aggregation (ORDERED)
+    # ---------------------------
     hourly = (
-        df.withColumn("hour_ts", date_trunc("hour", col("candle_close_time")))
-          .groupBy("symbol", "hour_ts")
-          .agg(
-                first("open").alias("open"),
-                avg("close").alias("avg_price"),
-                max("high").alias("high"),
-                min("low").alias("low"),
-                last("close").alias("close")
-          )
+        df
+        .withColumn("hour_ts", date_trunc("hour", col("candle_close_time")))
+        .orderBy("candle_close_time")  # CRITICAL for correct OHLC
+        .groupBy("symbol", "hour_ts")
+        .agg(
+            first("open").alias("open"),
+            max("high").alias("high"),
+            min("low").alias("low"),
+            avg("close").alias("avg_price"),
+            last("close").alias("close")
+        )
     )
 
-    spark.conf.set(
-        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    # ---------------------------
+    # Write (single file, overwrite)
+    # ---------------------------
+    (
+        hourly
+        .coalesce(1)      # prevents duplicate parquet files
+        .write
+        .mode("overwrite")
+        .parquet(out)
     )
-
-    hourly.write.mode("overwrite").parquet(out)
 
     spark.stop()
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compute hourly OHLC from raw minute data.")
-    parser.add_argument("--symbol", type=str, required=True, help="Trading symbol (e.g., BTCUSDT)")
-    parser.add_argument("--date", type=str, required=True, help="Date in YYYY-MM-DD format")
+    parser = argparse.ArgumentParser(
+        description="Compute hourly OHLC from raw minute data."
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        required=True,
+        help="Trading symbol (e.g., BTCUSDT)"
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        required=True,
+        help="Date in YYYY-MM-DD format"
+    )
 
     args = parser.parse_args()
     main(args.symbol, args.date)

@@ -3,7 +3,7 @@ import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, avg, stddev, lag, log, hour,
-    dayofweek, when, greatest, lit
+    dayofweek, when, greatest, lit, to_date
 )
 from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StructField, DoubleType
@@ -13,6 +13,7 @@ from pyspark.sql.types import StructType, StructField, DoubleType
 # Pandas EMA function
 # ---------------------------
 def compute_ema(pdf: pd.DataFrame) -> pd.DataFrame:
+    # CRITICAL: deterministic ordering
     pdf = pdf.sort_values("candle_close_time")
 
     pdf["ema_5"]  = pdf["close"].ewm(span=5, adjust=False).mean()
@@ -34,8 +35,12 @@ def main(symbol: str, date: str):
         .getOrCreate()
     )
     spark.conf.set("spark.sql.shuffle.partitions", "8")
+    spark.conf.set("mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
 
-    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/{date}/"
+    # ---------------------------
+    # Paths (DATE-scoped is correct here)
+    # ---------------------------
+    staging = f"batch/tmp/staging/crypto-raw/binance/{symbol}/lookback_60/{date}/"
     out = f"spark/gold/tmp/gold/features/binance/{symbol}/{date}/"
 
     df = spark.read.parquet(staging)
@@ -56,7 +61,10 @@ def main(symbol: str, date: str):
     features = (
         df
         # returns
-        .withColumn("log_return_1", log(col("close") / lag("close").over(w1)))
+        .withColumn(
+            "log_return_1",
+            log(col("close") / lag("close").over(w1))
+        )
         .withColumn(
             "return_5",
             (col("close") - lag("close", 5).over(w1)) /
@@ -84,7 +92,9 @@ def main(symbol: str, date: str):
         .withColumn(
             "rsi_14",
             when(col("avg_loss_14") == 0, lit(100.0))
-            .otherwise(100 - (100 / (1 + col("avg_gain_14") / col("avg_loss_14"))))
+            .otherwise(
+                100 - (100 / (1 + col("avg_gain_14") / col("avg_loss_14")))
+            )
         )
 
         # time features
@@ -125,11 +135,20 @@ def main(symbol: str, date: str):
         "day_of_week"
     )
 
-    spark.conf.set(
-        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    final = final.filter(
+        to_date(col("ts")) == date
+    )
+    # ---------------------------
+    # Write (single file, overwrite)
+    # ---------------------------
+    (
+        final
+        .coalesce(1)          # CRITICAL: prevents duplicate parquet files
+        .write
+        .mode("overwrite")
+        .parquet(out)
     )
 
-    final.write.mode("overwrite").parquet(out)
     spark.stop()
 
 
@@ -138,4 +157,5 @@ if __name__ == "__main__":
     p.add_argument("--symbol", required=True)
     p.add_argument("--date", required=True)
     args = p.parse_args()
+
     main(args.symbol, args.date)
