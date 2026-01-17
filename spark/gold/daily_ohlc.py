@@ -25,11 +25,6 @@ def main(symbol, date):
 
     w = Window.partitionBy("symbol").orderBy("date")
 
-    daily = daily.withColumn(
-        "returns",
-        (col("close") - lag("close").over(w)) / lag("close").over(w)
-    )
-
     spark.conf.set(
         "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
     )
